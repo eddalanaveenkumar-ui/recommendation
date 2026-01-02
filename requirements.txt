@@ -1,0 +1,6 @@
+google-api-python-client
+pymongo
+dnspython
+python-dotenv
+isodate
+flask
