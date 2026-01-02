@@ -4,3 +4,4 @@ dnspython
 python-dotenv
 isodate
 flask
+flask-cors
