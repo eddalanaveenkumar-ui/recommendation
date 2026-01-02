@@ -3,7 +3,6 @@ from pymongo import MongoClient
 from datetime import datetime
 import random
 import os
-import json
 from dotenv import load_dotenv
 from flask_cors import CORS
 
@@ -85,10 +84,12 @@ def update_user_profile(user_id, actions):
         if vid not in history:
             history.append(vid)
             
-        if act_type == "like" and vid not in liked_videos:
-            liked_videos.append(vid)
-        elif act_type == "save" and vid not in saved_videos:
-            saved_videos.append(vid)
+        if act_type == "like":
+            if vid not in liked_videos:
+                liked_videos.append(vid)
+        elif act_type == "save":
+            if vid not in saved_videos:
+                saved_videos.append(vid)
             
         # Update Watch Time
         duration = video_data.get("duration", 0)
