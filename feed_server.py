@@ -5,12 +5,17 @@ import random
 import os
 from dotenv import load_dotenv
 from flask_cors import CORS
+import logging
 
 # Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for frontend access
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = app.logger
 
 # --- Database Connection ---
 MONGO_URI = os.getenv("MONGO_URI")
@@ -43,6 +48,7 @@ def update_user_profile(user_id, actions):
     user_profile = user_profiles_collection.find_one({"user_id": user_id})
     
     if not user_profile:
+        logger.info(f"Creating new profile for user_id: {user_id} during update")
         user_profile = {
             "user_id": user_id,
             "keyword_scores": {},
@@ -75,7 +81,7 @@ def update_user_profile(user_id, actions):
             continue
             
         # Update Daily Watch Time
-        if duration > 0:
+        if act_type == "watch" and duration > 0:
             stats = daily_stats.get(current_date_str, {"watch_time": 0})
             stats["watch_time"] += duration
             daily_stats[current_date_str] = stats
@@ -91,7 +97,7 @@ def update_user_profile(user_id, actions):
             saved_videos.append({"video_id": vid, "timestamp": timestamp})
             
         # Update Watch History
-        if act_type not in ["skip_early"]:
+        if act_type in ["watch", "like", "save", "share", "watch_till_end", "rewatch"]:
              watch_history = [v for v in watch_history if v["video_id"] != vid]
              watch_history.append({"video_id": vid, "timestamp": timestamp})
 
@@ -134,10 +140,12 @@ def update_user_profile(user_id, actions):
     )
 
 def get_personalized_feed(user_id, limit):
+    logger.info(f"Getting feed for user_id: {user_id}, limit: {limit}")
     user_profile = user_profiles_collection.find_one({"user_id": user_id})
     
     # Cold Start
     if not user_profile:
+        logger.info(f"User profile not found for {user_id}, returning random feed")
         pipeline = [{"$sample": {"size": limit}}, {"$project": {"_id": 0}}]
         return list(videos_collection.aggregate(pipeline))
 
@@ -149,7 +157,10 @@ def get_personalized_feed(user_id, limit):
     top_keywords = sorted(keyword_scores, key=keyword_scores.get, reverse=True)[:10]
     top_masala = sorted(masala_scores, key=masala_scores.get, reverse=True)[:5]
     
+    logger.info(f"Top keywords: {top_keywords}, Top masala: {top_masala}")
+    
     if not top_keywords and not top_masala:
+         logger.info("No preferences found, returning random feed excluding history")
          pipeline = [{"$match": {"video_id": {"$nin": history}}}, {"$sample": {"size": limit}}, {"$project": {"_id": 0}}]
          return list(videos_collection.aggregate(pipeline))
 
@@ -162,9 +173,11 @@ def get_personalized_feed(user_id, limit):
     }
     
     candidates = list(videos_collection.find(query, {"_id": 0}).limit(limit * 3))
+    logger.info(f"Found {len(candidates)} candidates based on preferences")
     
     if len(candidates) < limit:
         needed = limit - len(candidates)
+        logger.info(f"Not enough candidates, filling with {needed} random videos")
         random_fill = list(videos_collection.aggregate([
             {"$match": {"video_id": {"$nin": history}}},
             {"$sample": {"size": needed}},
@@ -240,6 +253,8 @@ def login():
     user_id = data.get("user_id")
     email = data.get("email")
     
+    logger.info(f"Login request for user_id: {user_id}, email: {email}")
+    
     if not user_id or not email:
         return jsonify({"error": "user_id and email required"}), 400
         
@@ -258,6 +273,8 @@ def feed():
         actions = data.get("actions", [])
         is_first_request = data.get("is_first_request", False)
         
+        logger.info(f"Feed request for user_id: {user_id}, actions: {len(actions)}")
+        
         if not user_id:
             return jsonify({"error": "user_id is required"}), 400
 
@@ -267,13 +284,15 @@ def feed():
         batch_size = 5 if is_first_request else 10
         videos = get_personalized_feed(user_id, batch_size)
         
+        logger.info(f"Returning {len(videos)} videos for user_id: {user_id}")
+        
         return jsonify({
             "user_id": user_id,
             "batch_size": len(videos),
             "videos": videos
         }), 200
     except Exception as e:
-        print(f"Error: {e}")
+        logger.error(f"Error in feed endpoint: {e}")
         return jsonify({"error": "Internal Server Error"}), 500
 
 @app.route('/api/history/<user_id>', methods=['GET'])
