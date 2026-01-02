@@ -235,9 +235,10 @@ def get_user_stats_data(user_id):
 
 # --- API Endpoints ---
 
-@app.route('/health', methods=['GET'])
+@app.route('/', methods=['GET'])
 def health_check():
-    return jsonify({"status": "active", "service": "feed-server"}), 200
+    # CRITICAL FIX: This route must return a 200 OK for Render's health check.
+    return jsonify({"status": "ok", "service": "feed-server"}), 200
 
 @app.route('/api/login', methods=['POST'])
 def login():
