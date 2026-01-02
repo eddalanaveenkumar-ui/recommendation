@@ -13,3 +13,5 @@ videos = db["videos"]
 videos.create_index([("video_id", ASCENDING)], unique=True)
 
 user_keywords = db["user_keywords"]
+user_profiles = db["user_profiles"]
+user_profiles.create_index([("user_id", ASCENDING)], unique=True)

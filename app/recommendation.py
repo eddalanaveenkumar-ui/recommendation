@@ -1,5 +1,5 @@
 from app.db import db, videos
-from datetime import datetime
+from datetime import datetime, timedelta
 import random
 
 # Weights for user actions
@@ -10,13 +10,30 @@ ACTION_WEIGHTS = {
     "save": 4,
     "share": 5,
     "open_comments": 2,
-    "skip_early": -3
+    "skip_early": -3,
+    "watch": 1
 }
+
+def update_user_profile(user_id, email=None):
+    """
+    Creates or updates a user profile.
+    """
+    update_data = {
+        "last_updated": datetime.utcnow()
+    }
+    if email:
+        update_data["email"] = email
+
+    db.user_profiles.update_one(
+        {"user_id": user_id},
+        {"$set": update_data},
+        upsert=True
+    )
 
 def process_user_actions(user_id, actions):
     """
     Process a batch of user actions to update user preferences.
-    actions: list of dicts {video_id, action_type, ...}
+    actions: list of dicts {video_id, action_type, duration, ...}
     """
     user_profile = db.user_profiles.find_one({"user_id": user_id})
     
@@ -26,18 +43,56 @@ def process_user_actions(user_id, actions):
             "keyword_scores": {},
             "masala_scores": {},
             "history": [],
+            "watch_history": [],
+            "liked_videos": [],
+            "saved_videos": [],
+            "daily_stats": {},
             "last_updated": datetime.utcnow()
         }
 
     keyword_scores = user_profile.get("keyword_scores", {})
     masala_scores = user_profile.get("masala_scores", {})
     history = set(user_profile.get("history", []))
+    
+    watch_history = user_profile.get("watch_history", [])
+    liked_videos = user_profile.get("liked_videos", [])
+    saved_videos = user_profile.get("saved_videos", [])
+    daily_stats = user_profile.get("daily_stats", {})
+    
+    current_date_str = datetime.utcnow().strftime("%Y-%m-%d")
 
     for action in actions:
         vid = action.get("video_id")
         act_type = action.get("action_type")
+        duration = action.get("duration", 0)
         
-        if not vid or act_type not in ACTION_WEIGHTS:
+        if not vid:
+            continue
+
+        # Update Daily Watch Time
+        if duration > 0:
+            stats = daily_stats.get(current_date_str, {"watch_time": 0})
+            stats["watch_time"] += duration
+            daily_stats[current_date_str] = stats
+            
+        timestamp = datetime.utcnow()
+        
+        # Update Lists
+        if act_type == "like":
+            # Remove if exists to update timestamp/avoid duplicates
+            liked_videos = [v for v in liked_videos if v["video_id"] != vid]
+            liked_videos.append({"video_id": vid, "timestamp": timestamp})
+        elif act_type == "save":
+            saved_videos = [v for v in saved_videos if v["video_id"] != vid]
+            saved_videos.append({"video_id": vid, "timestamp": timestamp})
+            
+        # Update Watch History
+        if act_type not in ["skip_early"]:
+             watch_history = [v for v in watch_history if v["video_id"] != vid]
+             watch_history.append({"video_id": vid, "timestamp": timestamp})
+
+        # Recommendation Logic
+        if act_type not in ACTION_WEIGHTS:
             continue
             
         # Add to history to avoid repeating immediately
@@ -67,7 +122,11 @@ def process_user_actions(user_id, actions):
             "$set": {
                 "keyword_scores": keyword_scores,
                 "masala_scores": masala_scores,
-                "history": list(history)[-500:], # Keep last 500 watched
+                "history": list(history)[-500:], 
+                "watch_history": watch_history[-200:],
+                "liked_videos": liked_videos,
+                "saved_videos": saved_videos,
+                "daily_stats": daily_stats,
                 "last_updated": datetime.utcnow()
             }
         },
@@ -126,3 +185,48 @@ def get_recommendations(user_id, limit=10):
     # Shuffle and return
     random.shuffle(candidates)
     return candidates[:limit]
+
+def get_user_list(user_id, list_type="history", limit=20):
+    user_profile = db.user_profiles.find_one({"user_id": user_id})
+    if not user_profile:
+        return []
+        
+    if list_type == "liked":
+        items = user_profile.get("liked_videos", [])
+    elif list_type == "saved":
+        items = user_profile.get("saved_videos", [])
+    else:
+        items = user_profile.get("watch_history", [])
+        
+    # Sort by timestamp desc
+    items.sort(key=lambda x: x["timestamp"], reverse=True)
+    items = items[:limit]
+    
+    # Enrich with video details
+    results = []
+    for item in items:
+        vid = item["video_id"]
+        video_data = videos.find_one({"video_id": vid}, {"_id": 0})
+        if video_data:
+            video_data["interaction_timestamp"] = item["timestamp"]
+            results.append(video_data)
+            
+    return results
+
+def get_user_stats(user_id):
+    user_profile = db.user_profiles.find_one({"user_id": user_id})
+    if not user_profile:
+        return {}
+        
+    daily_stats = user_profile.get("daily_stats", {})
+    
+    # Filter last 7 days
+    today = datetime.utcnow().date()
+    stats_response = {}
+    
+    for i in range(7):
+        date_key = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+        data = daily_stats.get(date_key, {"watch_time": 0})
+        stats_response[date_key] = data
+        
+    return stats_response

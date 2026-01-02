@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 from pymongo import MongoClient
-from datetime import datetime
+from datetime import datetime, timedelta
 import random
 import os
 from dotenv import load_dotenv
@@ -27,7 +27,8 @@ ACTION_WEIGHTS = {
     "save": 4,
     "share": 5,
     "open_comments": 2,
-    "skip_early": -3
+    "skip_early": -3,
+    "watch": 1
 }
 
 # --- Core Logic ---
@@ -47,26 +48,60 @@ def update_user_profile(user_id, actions):
             "keyword_scores": {},
             "masala_scores": {},
             "history": [],
+            "watch_history": [],
             "liked_videos": [],
             "saved_videos": [],
-            "total_watch_time": 0,
+            "daily_stats": {},
             "last_updated": datetime.utcnow()
         }
 
     keyword_scores = user_profile.get("keyword_scores", {})
     masala_scores = user_profile.get("masala_scores", {})
-    history = user_profile.get("history", [])
+    history = set(user_profile.get("history", []))
+    
+    watch_history = user_profile.get("watch_history", [])
     liked_videos = user_profile.get("liked_videos", [])
     saved_videos = user_profile.get("saved_videos", [])
-    total_watch_time = user_profile.get("total_watch_time", 0)
+    daily_stats = user_profile.get("daily_stats", {})
+    
+    current_date_str = datetime.utcnow().strftime("%Y-%m-%d")
 
     for action in actions:
         vid = action.get("video_id")
         act_type = action.get("action_type")
+        duration = action.get("duration", 0)
         
-        if not vid or act_type not in ACTION_WEIGHTS:
+        if not vid:
             continue
             
+        # Update Daily Watch Time
+        if duration > 0:
+            stats = daily_stats.get(current_date_str, {"watch_time": 0})
+            stats["watch_time"] += duration
+            daily_stats[current_date_str] = stats
+            
+        timestamp = datetime.utcnow()
+
+        # Update Lists
+        if act_type == "like":
+            liked_videos = [v for v in liked_videos if v["video_id"] != vid]
+            liked_videos.append({"video_id": vid, "timestamp": timestamp})
+        elif act_type == "save":
+            saved_videos = [v for v in saved_videos if v["video_id"] != vid]
+            saved_videos.append({"video_id": vid, "timestamp": timestamp})
+            
+        # Update Watch History
+        if act_type not in ["skip_early"]:
+             watch_history = [v for v in watch_history if v["video_id"] != vid]
+             watch_history.append({"video_id": vid, "timestamp": timestamp})
+
+        # Recommendation Logic
+        if act_type not in ACTION_WEIGHTS:
+            continue
+            
+        # Add to history to avoid repeating immediately
+        history.add(vid)
+        
         # Fetch video metadata
         video_data = videos_collection.find_one({"video_id": vid})
         if not video_data:
@@ -80,24 +115,6 @@ def update_user_profile(user_id, actions):
         for mk in video_data.get("masala_keywords", []):
             masala_scores[mk] = masala_scores.get(mk, 0) + weight
 
-        # Update Lists based on action
-        if vid not in history:
-            history.append(vid)
-            
-        if act_type == "like":
-            if vid not in liked_videos:
-                liked_videos.append(vid)
-        elif act_type == "save":
-            if vid not in saved_videos:
-                saved_videos.append(vid)
-            
-        # Update Watch Time
-        duration = video_data.get("duration", 0)
-        if act_type in ["watch_till_end", "rewatch"]:
-            total_watch_time += duration
-        elif act_type == "skip_early":
-            total_watch_time += min(duration, 3) # Assume 3 seconds watched
-
     # Save changes
     user_profiles_collection.update_one(
         {"user_id": user_id},
@@ -105,10 +122,11 @@ def update_user_profile(user_id, actions):
             "$set": {
                 "keyword_scores": keyword_scores,
                 "masala_scores": masala_scores,
-                "history": history[-1000:], 
-                "liked_videos": liked_videos[-500:],
-                "saved_videos": saved_videos[-500:],
-                "total_watch_time": total_watch_time,
+                "history": list(history)[-1000:], 
+                "watch_history": watch_history[-200:],
+                "liked_videos": liked_videos,
+                "saved_videos": saved_videos,
+                "daily_stats": daily_stats,
                 "last_updated": datetime.utcnow()
             }
         },
@@ -157,17 +175,80 @@ def get_personalized_feed(user_id, limit):
     random.shuffle(candidates)
     return candidates[:limit]
 
-def get_videos_by_ids(video_ids):
-    """Helper to fetch video details for a list of IDs"""
-    if not video_ids:
+def get_user_list_data(user_id, list_type="history", limit=20):
+    user_profile = user_profiles_collection.find_one({"user_id": user_id})
+    if not user_profile:
         return []
-    return list(videos_collection.find({"video_id": {"$in": video_ids}}, {"_id": 0}))
+        
+    if list_type == "liked":
+        items = user_profile.get("liked_videos", [])
+    elif list_type == "saved":
+        items = user_profile.get("saved_videos", [])
+    else:
+        items = user_profile.get("watch_history", [])
+        
+    # Sort by timestamp desc
+    items.sort(key=lambda x: x["timestamp"], reverse=True)
+    items = items[:limit]
+    
+    # Enrich with video details
+    results = []
+    for item in items:
+        vid = item["video_id"]
+        video_data = videos_collection.find_one({"video_id": vid}, {"_id": 0})
+        if video_data:
+            video_data["interaction_timestamp"] = item["timestamp"]
+            results.append(video_data)
+            
+    return results
+
+def get_user_stats_data(user_id):
+    user_profile = user_profiles_collection.find_one({"user_id": user_id})
+    if not user_profile:
+        return {}
+        
+    daily_stats = user_profile.get("daily_stats", {})
+    
+    # Filter last 7 days
+    today = datetime.utcnow().date()
+    stats_response = {}
+    
+    for i in range(7):
+        date_key = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+        data = daily_stats.get(date_key, {"watch_time": 0})
+        stats_response[date_key] = data
+        
+    return stats_response
 
 # --- API Endpoints ---
 
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({"status": "active", "service": "feed-server"}), 200
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    """
+    Endpoint to register/login user and store email.
+    Payload:
+    {
+        "user_id": "123",
+        "email": "user@example.com"
+    }
+    """
+    data = request.json
+    user_id = data.get("user_id")
+    email = data.get("email")
+    
+    if not user_id or not email:
+        return jsonify({"error": "user_id and email required"}), 400
+        
+    user_profiles_collection.update_one(
+        {"user_id": user_id},
+        {"$set": {"email": email, "last_updated": datetime.utcnow()}},
+        upsert=True
+    )
+    return jsonify({"status": "success"})
 
 @app.route('/api/feed', methods=['POST'])
 def feed():
@@ -197,44 +278,23 @@ def feed():
 
 @app.route('/api/history/<user_id>', methods=['GET'])
 def get_history(user_id):
-    profile = user_profiles_collection.find_one({"user_id": user_id})
-    if not profile:
-        return jsonify([])
-    # Return most recent first
-    ids = profile.get("history", [])[::-1]
-    videos = get_videos_by_ids(ids)
-    # Sort videos to match history order
-    videos_map = {v['video_id']: v for v in videos}
-    ordered_videos = [videos_map[vid] for vid in ids if vid in videos_map]
-    return jsonify(ordered_videos)
+    videos = get_user_list_data(user_id, list_type="history")
+    return jsonify(videos)
 
 @app.route('/api/liked/<user_id>', methods=['GET'])
 def get_liked(user_id):
-    profile = user_profiles_collection.find_one({"user_id": user_id})
-    if not profile:
-        return jsonify([])
-    ids = profile.get("liked_videos", [])[::-1]
-    videos = get_videos_by_ids(ids)
-    videos_map = {v['video_id']: v for v in videos}
-    ordered_videos = [videos_map[vid] for vid in ids if vid in videos_map]
-    return jsonify(ordered_videos)
+    videos = get_user_list_data(user_id, list_type="liked")
+    return jsonify(videos)
 
 @app.route('/api/saved/<user_id>', methods=['GET'])
 def get_saved(user_id):
-    profile = user_profiles_collection.find_one({"user_id": user_id})
-    if not profile:
-        return jsonify([])
-    ids = profile.get("saved_videos", [])[::-1]
-    videos = get_videos_by_ids(ids)
-    videos_map = {v['video_id']: v for v in videos}
-    ordered_videos = [videos_map[vid] for vid in ids if vid in videos_map]
-    return jsonify(ordered_videos)
+    videos = get_user_list_data(user_id, list_type="saved")
+    return jsonify(videos)
 
 @app.route('/api/watchtime/<user_id>', methods=['GET'])
 def get_watchtime(user_id):
-    profile = user_profiles_collection.find_one({"user_id": user_id})
-    total_seconds = profile.get("total_watch_time", 0) if profile else 0
-    return jsonify({"total_seconds": total_seconds})
+    stats = get_user_stats_data(user_id)
+    return jsonify(stats)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000, debug=True)
