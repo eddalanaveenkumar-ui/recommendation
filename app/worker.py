@@ -35,6 +35,7 @@ def run_worker(api_key, tasks):
                 for vid, meta in meta_map.items():
                     stats = meta.get("statistics", {})
                     content_details = meta.get("contentDetails", {})
+                    snippet = meta.get("snippet", {})
                     
                     views = int(stats.get("viewCount", 0))
                     likes = int(stats.get("likeCount", 0))
@@ -50,10 +51,23 @@ def run_worker(api_key, tasks):
                     if views < MIN_VIEWS or likes < MIN_LIKES or comments < MIN_COMMENTS:
                         continue
 
-                    title = meta["snippet"]["title"]
-                    desc = meta["snippet"]["description"]
+                    title = snippet["title"]
+                    desc = snippet["description"]
 
                     keywords = extract_keywords(title, desc, task["language"])
+
+                    # Extract dimensions from thumbnails
+                    thumbnails = snippet.get("thumbnails", {})
+                    width, height = 0, 0
+                    if "maxres" in thumbnails:
+                        width = thumbnails["maxres"].get("width")
+                        height = thumbnails["maxres"].get("height")
+                    elif "high" in thumbnails:
+                        width = thumbnails["high"].get("width")
+                        height = thumbnails["high"].get("height")
+                    elif "medium" in thumbnails:
+                        width = thumbnails["medium"].get("width")
+                        height = thumbnails["medium"].get("height")
 
                     data = {
                         "video_id": vid,
@@ -67,6 +81,8 @@ def run_worker(api_key, tasks):
                         "likes": likes,
                         "comments": comments,
                         "duration": duration_seconds,
+                        "width": width,
+                        "height": height,
                         "masala_keywords": generate_masala(
                             task["niche"], title, views, likes
                         ),
